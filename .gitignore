@@ -2,3 +2,6 @@
 /aigcnav.pem
 /test_scripts
 /venv
+/src/data
+*.pyc
+*.db
