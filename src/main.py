@@ -1,16 +1,17 @@
 # Import necessary modules and classes
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, JSON, Boolean, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, JSON, Boolean, DateTime, ForeignKey
 import sqlalchemy
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy.sql import func
 from pydantic import BaseModel
 from typing import List
 import json
 from api_handler import call_gpts_concurrently, parse_video_data
 from openai import AsyncOpenAI
 from urllib.parse import urlparse, parse_qs
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time
 # FastAPI app instance
 
 # TODO: RESPONSE TYPES AND CODES
@@ -41,8 +42,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+
 # Database setup
 DATABASE_URL = "sqlite:///./test.db"
+    
+response_router = APIRouter(prefix="/survey-responses", tags=["Survey Responses"])
+questions_router = APIRouter(prefix="/questions", tags=["Questions"])
+analytics_router = APIRouter(prefix="/analytics", tags=["Analytics"])
+
 
 
 engine = create_engine(DATABASE_URL)
@@ -79,6 +87,19 @@ class Analytics(Base):
     time_spent_recommendation = Column(Integer, nullable=True)
     audio_warning             = Column(Boolean, nullable=True)
 
+
+class SurveyResponse(Base):
+    __tablename__ = "SurveyResponses"
+
+    response_id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    time_answered = Column(DateTime(timezone=True), server_default=func.now())
+    question_id = Column(Integer, ForeignKey("SurveyQuestions.question_id"), nullable=False)
+    answer = Column(String, nullable=False)
+
+    question = relationship("Questions")
+
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -97,7 +118,7 @@ class QuestionsCreate(BaseModel):
     options: List[str]
 
 class QuestionsResponse(BaseModel):
-    id: int
+    question_id: int
     text: str
     type: str
     options: List[str]
@@ -137,28 +158,56 @@ class AnalyticsResponse(BaseModel):
     class Config:
         from_attributes = True  # required for SQLAlchemy → Pydantic
 
+class SurveyResponseCreate(BaseModel):
+    user_id: str
+    question_id: int
+    answer: str
+
+class SurveyResponseUpdate(BaseModel):
+    answer: str
+
+class SurveyResponseOut(BaseModel):
+    response_id: int
+    user_id: str
+    time_answered: datetime
+    question_id: int
+    answer: str
+
+    class Config:
+        from_attributes = True
+
+class BulkSurveyAnswer(BaseModel):
+    question_id: int
+    answer: str
+
+class BulkSurveyResponseCreate(BaseModel):
+    user_id: str
+    time_answered: datetime
+    responses: List[BulkSurveyAnswer]
 
 
-@app.post("/questions/", response_model=QuestionsResponse)
+
+@questions_router.post("/", response_model=QuestionsResponse)
 def create_question(
     question: QuestionsCreate,
     db: Session = Depends(get_db)
 ):
     db_question = Questions(**question.model_dump())
+    print(db_question)
     db.add(db_question)
     db.commit()
     db.refresh(db_question)
     return db_question
 
 
-@app.get("/questions/", response_model=List[QuestionsResponse])
+@questions_router.get("/", response_model=List[QuestionsResponse])
 def get_questions(
     db: Session = Depends(get_db)
 ):
     return db.query(Questions).all()
 
 
-@app.get("/questions/{question_id}", response_model=QuestionsResponse)
+@questions_router.get("/{question_id}", response_model=QuestionsResponse)
 def get_question(
     question_id: int,
     db: Session = Depends(get_db)
@@ -169,7 +218,7 @@ def get_question(
     return question
 
 
-@app.put("/questions/{question_id}", response_model=QuestionsResponse)
+@questions_router.put("/{question_id}", response_model=QuestionsResponse)
 def update_question(
     question_id: int,
     updated: QuestionsCreate,
@@ -187,7 +236,7 @@ def update_question(
     return question
 
 
-@app.delete("/questions/{question_id}")
+@questions_router.delete("/{question_id}")
 def delete_question(
     question_id: int,
     db: Session = Depends(get_db)
@@ -216,14 +265,14 @@ def create_base_interaction(data: dict, user_id: str, url: str, interaction_id: 
     print('saved base analytics successfully')
 
 
-@app.get("/analytics/", response_model=List[AnalyticsResponse])
+@analytics_router.get("/", response_model=List[AnalyticsResponse])
 def get_analytics(
     db: Session = Depends(get_db)
 ):
     return db.query(Analytics).all()
 
 
-@app.put("/analytics/{interaction_id}")
+@analytics_router.put("/{interaction_id}")
 def save_full_analytics(
     interaction_id: str,
     updated: AnalyticsUpdate,
@@ -280,6 +329,144 @@ def extract_youtube_video_id(url: str) -> str | None:
 
     return None
 
+def day_bounds(dt: datetime):
+    start = datetime.combine(dt.date(), time.min)
+    end = datetime.combine(dt.date(), time.max)
+    return start, end
+
+def validate_survey_responses(
+    *,
+    db: Session,
+    user_id: str,
+    time_answered: datetime,
+    responses: list[tuple[int, str]]
+):
+    """
+    responses: List of (question_id, answer)
+    """
+
+    # 1️⃣ Check duplicate question_ids in request
+    question_ids = [qid for qid, _ in responses]
+    if len(question_ids) != len(set(question_ids)):
+        raise HTTPException(
+            status_code=400,
+            detail="Duplicate question_id in request"
+        )
+
+    # 2️⃣ Check existing answers on same day
+    start, end = day_bounds(time_answered)
+
+    existing = (
+        db.query(SurveyResponse.question_id)
+        .filter(
+            SurveyResponse.user_id == user_id,
+            SurveyResponse.question_id.in_(question_ids),
+            SurveyResponse.time_answered.between(start, end)
+        )
+        .all()
+    )
+
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "User already answered some questions today",
+                "question_ids": [q[0] for q in existing]
+            }
+        )
+
+@response_router.post("/", response_model=SurveyResponseOut)
+def create_response(
+    payload: SurveyResponseCreate,
+    db: Session = Depends(get_db)
+):
+    now = datetime.utcnow()
+
+    validate_survey_responses(
+        db=db,
+        user_id=payload.user_id,
+        time_answered=now,
+        responses=[(payload.question_id, payload.answer)]
+    )
+
+    response = SurveyResponse(
+        user_id=payload.user_id,
+        question_id=payload.question_id,
+        answer=payload.answer,
+        time_answered=now
+    )
+
+    db.add(response)
+    db.commit()
+    db.refresh(response)
+    return response
+
+@response_router.get("/", response_model=List[SurveyResponseOut])
+def get_all_responses(db: Session = Depends(get_db)):
+    return db.query(SurveyResponse).all()
+
+
+@response_router.get("/question/{question_id}", response_model=List[SurveyResponseOut])
+def get_responses_by_question(
+    question_id: int,
+    db: Session = Depends(get_db)
+):
+    return db.query(SurveyResponse).filter_by(question_id=question_id).all()
+
+
+@response_router.delete("/{response_id}")
+def delete_response(
+    response_id: int,
+    db: Session = Depends(get_db)
+):
+    response = db.query(SurveyResponse).filter_by(response_id=response_id).first()
+    if not response:
+        raise HTTPException(status_code=404, detail="Response not found")
+
+    db.delete(response)
+    db.commit()
+    return {"detail": "Response deleted"}
+
+
+@response_router.get("/user/{user_id}", response_model=List[SurveyResponseOut])
+def get_user_responses(
+    user_id: str,
+    db: Session = Depends(get_db)
+):
+    return db.query(SurveyResponse).filter_by(user_id=user_id).all()
+
+@response_router.post("/bulk")
+def create_bulk_responses(
+    payload: BulkSurveyResponseCreate,
+    db: Session = Depends(get_db)
+):
+    responses = [
+        (r.question_id, r.answer)
+        for r in payload.responses
+    ]
+
+    validate_survey_responses(
+        db=db,
+        user_id=payload.user_id,
+        time_answered=payload.time_answered,
+        responses=responses
+    )
+
+    objects = [
+        SurveyResponse(
+            user_id=payload.user_id,
+            time_answered=payload.time_answered,
+            question_id=r.question_id,
+            answer=r.answer
+        )
+        for r in payload.responses
+    ]
+
+    db.bulk_save_objects(objects)
+    db.commit()
+
+    return {"inserted": len(objects)}
+
 
 @app.get("/aig_tags")
 async def get_aigc_tag(
@@ -297,5 +484,7 @@ async def get_aigc_tag(
 
 if __name__ == "__main__":
     import uvicorn
-
+    app.include_router(response_router)
+    app.include_router(questions_router)
+    app.include_router(analytics_router)
     uvicorn.run(app, host="127.0.0.1", port=8000)
