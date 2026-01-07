@@ -11,7 +11,7 @@ import json
 from api_handler import call_gpts_concurrently, parse_video_data
 from openai import AsyncOpenAI
 from urllib.parse import urlparse, parse_qs
-from datetime import datetime, timezone, time
+from datetime import datetime, timezone, time, timedelta
 # FastAPI app instance
 
 # TODO: RESPONSE TYPES AND CODES
@@ -50,6 +50,7 @@ DATABASE_URL = "sqlite:///./test.db"
 response_router = APIRouter(prefix="/survey-responses", tags=["Survey Responses"])
 questions_router = APIRouter(prefix="/questions", tags=["Questions"])
 analytics_router = APIRouter(prefix="/analytics", tags=["Analytics"])
+diary_router = APIRouter(prefix="/user-diary", tags=["User Diary"])
 
 
 
@@ -92,13 +93,21 @@ class SurveyResponse(Base):
     __tablename__ = "SurveyResponses"
 
     response_id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, nullable=False, index=True)
-    time_answered = Column(DateTime(timezone=True), server_default=func.now())
+    user_id = Column(String, nullable=False)
+    time_answered = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable= False)
     question_id = Column(Integer, ForeignKey("SurveyQuestions.question_id"), nullable=False)
     answer = Column(String, nullable=False)
 
     question = relationship("Questions")
 
+
+class UserDiary(Base):
+    __tablename__ = "UserDiary"
+
+    diary_id = Column(Integer, primary_key=True, index=True)
+    text = Column(String, nullable=False)
+    time_written = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable= False)
+    user_id = Column(String, nullable=False)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -185,7 +194,134 @@ class BulkSurveyResponseCreate(BaseModel):
     time_answered: datetime
     responses: List[BulkSurveyAnswer]
 
+class UserDiaryCreate(BaseModel):
+    user_id: str
+    text: str
 
+class UserDiaryResponse(BaseModel):
+    diary_id: int
+    time_written: datetime
+    user_id: str
+    text: str
+
+    class Config:
+        from_attributes = True
+
+
+def validate_user_diary_constraints(
+    db: Session,
+    user_id: str,
+    max_entries: int = 10
+):
+    now = datetime.now(timezone.utc)
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_day = start_of_day + timedelta(days=1)
+
+    # 1️⃣ Same-day check
+    same_day_entry = (
+        db.query(UserDiary)
+        .filter(
+            UserDiary.user_id == user_id,
+            UserDiary.time_written >= start_of_day,
+            UserDiary.time_written < end_of_day
+        )
+        .first()
+    )
+
+    if same_day_entry:
+        print('alrady put a response today')
+        return False
+
+    # 2️⃣ Max entries check
+    total_entries = (
+        db.query(func.count(UserDiary.diary_id))
+        .filter(UserDiary.user_id == user_id)
+        .scalar()
+    )
+
+    if total_entries >= max_entries:
+        print('user already has max number of entires')
+        return False
+    
+    return True
+
+
+
+@diary_router.get(
+    "/",
+    response_model=List[UserDiaryResponse]
+)
+def get_all_user_diaries(
+    db: Session = Depends(get_db)
+):
+    return (
+        db.query(UserDiary)
+        .order_by(UserDiary.time_written.desc())
+        .all()
+    )
+
+
+
+@diary_router.get(
+    "/{user_id}",
+    response_model=List[UserDiaryResponse]
+)
+def get_user_diaries(user_id: str, db: Session = Depends(get_db)):
+    return (
+        db.query(UserDiary)
+        .filter(UserDiary.user_id == user_id)
+        .order_by(UserDiary.time_written.desc())
+        .all()
+    )
+
+
+
+@diary_router.post(
+    "/",
+    response_model=UserDiaryResponse
+)
+def create_user_diary(
+    diary: UserDiaryCreate,
+    db: Session = Depends(get_db)
+):
+    # ✅ Reusable validation
+    if not validate_user_diary_constraints(db, diary.user_id):
+         raise HTTPException(
+            status_code=400,
+            detail="User has reached the maximum number of diary entries today or for the entirity of the study."
+        )
+
+    new_diary = UserDiary(user_id=diary.user_id, text=diary.text)
+    db.add(new_diary)
+    db.commit()
+    db.refresh(new_diary)
+
+    return new_diary
+
+
+
+@diary_router.delete(
+    "/{diary_id}",
+    status_code=204
+)
+def delete_user_diary(
+    diary_id: int,
+    db: Session = Depends(get_db)
+):
+    diary = (
+        db.query(UserDiary)
+        .filter(UserDiary.diary_id == diary_id)
+        .first()
+    )
+
+    if not diary:
+        raise HTTPException(
+            status_code=404,
+            detail="Diary entry not found."
+        )
+
+    db.delete(diary)
+    db.commit()
 
 @questions_router.post("/", response_model=QuestionsResponse)
 def create_question(
@@ -480,6 +616,7 @@ async def get_aigc_tag(
     data = parse_video_data(video_id, yt_key)
     create_base_interaction(data, user_id, video_url, interaction_id, db)
     res = await call_gpts_concurrently(data, creator_prompt, comment_prompt, client)
+    res['diary'] = validate_user_diary_constraints(db, user_id)
     return res
 
 if __name__ == "__main__":
@@ -487,4 +624,5 @@ if __name__ == "__main__":
     app.include_router(response_router)
     app.include_router(questions_router)
     app.include_router(analytics_router)
+    app.include_router(diary_router)
     uvicorn.run(app, host="127.0.0.1", port=8000)
