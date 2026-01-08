@@ -3,6 +3,19 @@ from openai import AsyncOpenAI
 import json
 import asyncio
 
+src_map = {
+    'social security matters': 'https://www.ssa.gov/blog/en/',
+    'nbc news': 'https://www.nbcnews.com/',
+    'white house': 'https://trumpwhitehouse.archives.gov/',
+    'us house of representatives document repository': 'https://docs.house.gov/',
+    'council on foregin relations': 'https://www.cfr.org/',
+    'food and nutrition service': 'https://www.fns.usda.gov/',
+    'national library of medicine': 'https://pmc.ncbi.nlm.nih.gov/',
+    'dietary guidelines for americans': 'https://www.dietaryguidelines.gov/',
+    'harvard health publishing': 'https://www.health.harvard.edu/',
+    'wikipedia': 'https://en.wikipedia.org/'
+}
+
 
 def fetch_video_snippet(video_id: str, yt_key: str) -> dict:
     url = "https://www.googleapis.com/youtube/v3/videos"
@@ -96,6 +109,35 @@ f"""Now Classify the following comments:\n"""
  "3": "...",
  ....
 }"""
+    elif type=='risk':
+        prompt += \
+f'''\nNow classify the following metadata
+channel name: {metaData['video']['channelTitle']}
+Title: {metaData['video']['title']}
+Tags: {metaData['video']['tags']}
+Description: {metaData['video']['description']}'''
+        prompt += \
+'''\nYour Output (must match the format exactly):
+{
+    "category": ...,
+    "tactic": ...,
+    "risk": ...
+}'''
+    elif type=='action':
+        prompt += \
+f'''\n* These are the sources that you must pick from: {src_map.keys()}\n
+Now choose sources to verify for a content with the following metadata
+channel name: {metaData['video']['channelTitle']}
+Title: {metaData['video']['title']}
+Tags: {metaData['video']['tags']}
+Description: {metaData['video']['description']}'''
+        prompt += \
+'''\nYour Output (must match the format exactly):
+{
+    "sources": ["...", "...", ...]
+}
+'''
+
     return prompt
 
 
@@ -119,14 +161,18 @@ async def askGPT(prompt: str, client: AsyncOpenAI) -> str:
     )
     return response.output_text
 
-async def call_gpts_concurrently(data, base_prompt_cr, base_prompt_cm, client):
+async def call_gpts_concurrently(data, base_prompt_cr, base_prompt_cm, base_prompt_risk, base_prompt_act, client):
 
     prompt_cr = promptBuilder(data, base_prompt_cr, 'creator')
     prompt_cm = promptBuilder(data, base_prompt_cm, 'comments')
+    prompt_risk = promptBuilder(data, base_prompt_risk, 'risk')
+    prompt_act = promptBuilder(data, base_prompt_act, 'action')
 
-    res_cr, res_cm = await asyncio.gather(
+    res_cr, res_cm, res_risk, res_src = await asyncio.gather(
         askGPT(prompt_cr, client),
         askGPT(prompt_cm, client),
+        askGPT(prompt_risk, client),
+        askGPT(prompt_act, client)
     )
 
     def safe_json_load(s: str, data: dict):
@@ -139,11 +185,22 @@ async def call_gpts_concurrently(data, base_prompt_cr, base_prompt_cm, client):
             
         except json.JSONDecodeError:
             return {}
+    def safe_loads(s: str):
+        res = {}
+        try:
+            res = json.loads(s)
+        except:
+            print(f'exception while loading: {s}')
+            res = {}
 
+        return res
     final_json = {
         "creator_tag": res_cr,
-        "community_tags": safe_json_load(res_cm, data)
+        "community_tags": safe_json_load(res_cm, data),
+        "risk_evaluation": safe_loads(res_risk),
+        "sources": safe_loads(res_src)
     }
+    print(final_json)
     return final_json
     # return res_cr, res_cm
 
