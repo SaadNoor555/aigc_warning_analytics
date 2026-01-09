@@ -610,15 +610,21 @@ def create_bulk_responses(
         responses=responses
     )
 
-    objects = [
-        SurveyResponse(
-            user_id=payload.user_id,
-            time_answered=payload.time_answered,
-            question_id=r.question_id,
-            answer=r.answer
+    objects = []
+
+    for r in payload.responses:
+        if r.answer=='':
+            continue
+        objects.append(
+            SurveyResponse(
+                    user_id=payload.user_id,
+                    time_answered=payload.time_answered,
+                    question_id=r.question_id,
+                    answer=r.answer
+                )
         )
-        for r in payload.responses
-    ]
+        
+    print(len(objects))
 
     db.bulk_save_objects(objects)
     db.commit()
@@ -665,7 +671,7 @@ def createRiskEvalLablel(risk_eval):
     return {
         "level": risk_eval['risk'] if 'risk' in risk_eval else 'unknown',
         "category": risk_eval['category'] if 'category' in risk_eval else 'unknown',
-        "tactic": risk_eval['tactic'] if 'tactic' in risk_eval else 'unknown',
+        "tactics_name": risk_eval['tactic'] if 'tactic' in risk_eval else 'unknown',
         "tactics_details": tactic_map.get(risk_tactic.lower())
     }
 
@@ -714,10 +720,11 @@ async def get_aigc_tag(
     print(payload)
     return {"payload":payload}
 
+app.include_router(response_router)
+app.include_router(questions_router)
+app.include_router(analytics_router)
+app.include_router(diary_router)
+
 if __name__ == "__main__":
     import uvicorn
-    app.include_router(response_router)
-    app.include_router(questions_router)
-    app.include_router(analytics_router)
-    app.include_router(diary_router)
     uvicorn.run(app, host="127.0.0.1", port=8000)
