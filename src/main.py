@@ -375,6 +375,51 @@ def get_question(
         raise HTTPException(status_code=404, detail="Question not found")
     return question
 
+def day_bounds(dt: datetime):
+    start = datetime.combine(dt.date(), time.min)
+    end = datetime.combine(dt.date(), time.max)
+    return start, end
+
+
+@questions_router.get(
+    "/unanswered/{user_id}",
+    response_model=List[QuestionsResponse]
+)
+def get_unanswered_questions_today(
+    user_id: str,
+    db: Session = Depends(get_db)
+):
+    # Use naive UTC to match stored values
+    now = datetime.utcnow()
+    start, end = day_bounds(now)
+
+    # 1️⃣ Fetch question_ids answered today
+    answered_question_ids = [
+        qid for (qid,) in (
+            db.query(SurveyResponse.question_id)
+            .filter(
+                SurveyResponse.user_id == user_id,
+                SurveyResponse.time_answered >= start,
+                SurveyResponse.time_answered <= end,
+            )
+            .all()
+        )
+    ]
+
+    # 2️⃣ If user answered nothing today → return all questions
+    if not answered_question_ids:
+        print('no ans')
+        return db.query(Questions).all()
+
+    # 3️⃣ Fetch unanswered questions
+    unanswered_questions = (
+        db.query(Questions)
+        .filter(~Questions.question_id.in_(answered_question_ids))
+        .all()
+    )
+
+    return unanswered_questions
+
 
 @questions_router.put("/{question_id}", response_model=QuestionsResponse)
 def update_question(
@@ -728,3 +773,7 @@ app.include_router(diary_router)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# sudo systemctl stop fastapi
+# sudo systemctl start fastapi
