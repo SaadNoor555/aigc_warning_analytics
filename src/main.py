@@ -80,15 +80,6 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = sqlalchemy.orm.declarative_base()
 
-class Questions(Base):
-    __tablename__ = "SurveyQuestions"
-
-    question_id = Column(Integer, primary_key=True, index=True)
-    text = Column(String, nullable=False)
-    type = Column(String, nullable=False)
-    options = Column(JSON, nullable=False)
-
-
 
 class Analytics(Base):
     __tablename__ = "ToolAnalytics"
@@ -109,18 +100,7 @@ class Analytics(Base):
     time_spent_risk_label     = Column(Integer, nullable=True)
     time_spent_recommendation = Column(Integer, nullable=True)
     audio_warning             = Column(Boolean, nullable=True)
-
-
-class SurveyResponse(Base):
-    __tablename__ = "SurveyResponses"
-
-    response_id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, nullable=False)
-    time_answered = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable= False)
-    question_id = Column(Integer, ForeignKey("SurveyQuestions.question_id"), nullable=False)
-    answer = Column(String, nullable=False)
-
-    question = relationship("Questions")
+    survey                    = Column(Boolean, nullable=True)
 
 
 class UserDiary(Base):
@@ -143,20 +123,6 @@ def get_db():
         db.close()
 
 
-class QuestionsCreate(BaseModel):
-    text: str
-    type: str
-    options: List[str]
-
-class QuestionsResponse(BaseModel):
-    question_id: int
-    text: str
-    type: str
-    options: List[str]
-
-    class Config:
-        from_attributes = True  # required for SQLAlchemy → Pydantic
-
 class AnalyticsUpdate(BaseModel):
     platform_label  : str | None
     total_time_spent : int | None
@@ -166,6 +132,7 @@ class AnalyticsUpdate(BaseModel):
     time_spent_risk_label : int | None
     time_spent_recommendation : int | None
     audio_warning: bool | None
+    survey: bool | None
 
 
 class AnalyticsResponse(BaseModel):
@@ -185,6 +152,7 @@ class AnalyticsResponse(BaseModel):
     time_spent_risk_label : int | None
     time_spent_recommendation : int | None
     audio_warning: bool | None
+    survey: bool | None
 
     class Config:
         from_attributes = True  # required for SQLAlchemy → Pydantic
@@ -228,6 +196,9 @@ class UserDiaryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class TakenSurvey(BaseModel):
+    survey: bool
 
 
 def validate_user_diary_constraints(
@@ -345,112 +316,16 @@ def delete_user_diary(
     db.delete(diary)
     db.commit()
 
-@questions_router.post("/", response_model=QuestionsResponse)
-def create_question(
-    question: QuestionsCreate,
-    db: Session = Depends(get_db)
-):
-    db_question = Questions(**question.model_dump())
-    print(db_question)
-    db.add(db_question)
-    db.commit()
-    db.refresh(db_question)
-    return db_question
-
-
-@questions_router.get("/", response_model=List[QuestionsResponse])
-def get_questions(
-    db: Session = Depends(get_db)
-):
-    return db.query(Questions).all()
-
-
-@questions_router.get("/{question_id}", response_model=QuestionsResponse)
-def get_question(
-    question_id: int,
-    db: Session = Depends(get_db)
-):
-    question = db.query(Questions).filter(Questions.question_id == question_id).first()
-    if not question:
-        raise HTTPException(status_code=404, detail="Question not found")
-    return question
-
-def day_bounds(dt: datetime):
-    start = datetime.combine(dt.date(), time.min)
-    end = datetime.combine(dt.date(), time.max)
-    return start, end
-
-
 @questions_router.get(
     "/unanswered/{user_id}",
-    response_model=List[QuestionsResponse]
+    response_model=TakenSurvey
 )
 def get_unanswered_questions_today(
     user_id: str,
     db: Session = Depends(get_db)
 ):
-    # Use naive UTC to match stored values
-    now = datetime.utcnow()
-    start, end = day_bounds(now)
+    return TakenSurvey(survey=True)
 
-    # 1️⃣ Fetch question_ids answered today
-    answered_question_ids = [
-        qid for (qid,) in (
-            db.query(SurveyResponse.question_id)
-            .filter(
-                SurveyResponse.user_id == user_id,
-                SurveyResponse.time_answered >= start,
-                SurveyResponse.time_answered <= end,
-            )
-            .all()
-        )
-    ]
-
-    # 2️⃣ If user answered nothing today → return all questions
-    if not answered_question_ids:
-        print('no ans')
-        return db.query(Questions).all()
-
-    # 3️⃣ Fetch unanswered questions
-    unanswered_questions = (
-        db.query(Questions)
-        .filter(~Questions.question_id.in_(answered_question_ids))
-        .all()
-    )
-
-    return unanswered_questions
-
-
-@questions_router.put("/{question_id}", response_model=QuestionsResponse)
-def update_question(
-    question_id: int,
-    updated: QuestionsCreate,
-    db: Session = Depends(get_db)
-):
-    question = db.query(Questions).filter(Questions.question_id == question_id).first()
-    if not question:
-        raise HTTPException(status_code=404, detail="Question not found")
-
-    for key, value in updated.model_dump().items():
-        setattr(question, key, value)
-
-    db.commit()
-    db.refresh(question)
-    return question
-
-
-@questions_router.delete("/{question_id}")
-def delete_question(
-    question_id: int,
-    db: Session = Depends(get_db)
-):
-    question = db.query(Questions).filter(Questions.question_id == question_id).first()
-    if not question:
-        raise HTTPException(status_code=404, detail="Question not found")
-
-    db.delete(question)
-    db.commit()
-    return {"message": "Question deleted successfully"}
 
 def create_base_interaction(data: dict, user_id: str, url: str, interaction_id: str, db: Session):
     db_interaction = Analytics(
@@ -532,149 +407,6 @@ def extract_youtube_video_id(url: str) -> str | None:
 
     return None
 
-def day_bounds(dt: datetime):
-    start = datetime.combine(dt.date(), time.min)
-    end = datetime.combine(dt.date(), time.max)
-    return start, end
-
-def validate_survey_responses(
-    *,
-    db: Session,
-    user_id: str,
-    time_answered: datetime,
-    responses: list[tuple[int, str]]
-):
-    """
-    responses: List of (question_id, answer)
-    """
-
-    # 1️⃣ Check duplicate question_ids in request
-    question_ids = [qid for qid, _ in responses]
-    if len(question_ids) != len(set(question_ids)):
-        raise HTTPException(
-            status_code=400,
-            detail="Duplicate question_id in request"
-        )
-
-    # 2️⃣ Check existing answers on same day
-    start, end = day_bounds(time_answered)
-
-    existing = (
-        db.query(SurveyResponse.question_id)
-        .filter(
-            SurveyResponse.user_id == user_id,
-            SurveyResponse.question_id.in_(question_ids),
-            SurveyResponse.time_answered.between(start, end)
-        )
-        .all()
-    )
-
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "User already answered some questions today",
-                "question_ids": [q[0] for q in existing]
-            }
-        )
-
-@response_router.post("/", response_model=SurveyResponseOut)
-def create_response(
-    payload: SurveyResponseCreate,
-    db: Session = Depends(get_db)
-):
-    now = datetime.utcnow()
-
-    validate_survey_responses(
-        db=db,
-        user_id=payload.user_id,
-        time_answered=now,
-        responses=[(payload.question_id, payload.answer)]
-    )
-
-    response = SurveyResponse(
-        user_id=payload.user_id,
-        question_id=payload.question_id,
-        answer=payload.answer,
-        time_answered=now
-    )
-
-    db.add(response)
-    db.commit()
-    db.refresh(response)
-    return response
-
-@response_router.get("/", response_model=List[SurveyResponseOut])
-def get_all_responses(db: Session = Depends(get_db)):
-    return db.query(SurveyResponse).all()
-
-
-@response_router.get("/question/{question_id}", response_model=List[SurveyResponseOut])
-def get_responses_by_question(
-    question_id: int,
-    db: Session = Depends(get_db)
-):
-    return db.query(SurveyResponse).filter_by(question_id=question_id).all()
-
-
-@response_router.delete("/{response_id}")
-def delete_response(
-    response_id: int,
-    db: Session = Depends(get_db)
-):
-    response = db.query(SurveyResponse).filter_by(response_id=response_id).first()
-    if not response:
-        raise HTTPException(status_code=404, detail="Response not found")
-
-    db.delete(response)
-    db.commit()
-    return {"detail": "Response deleted"}
-
-
-@response_router.get("/user/{user_id}", response_model=List[SurveyResponseOut])
-def get_user_responses(
-    user_id: str,
-    db: Session = Depends(get_db)
-):
-    return db.query(SurveyResponse).filter_by(user_id=user_id).all()
-
-@response_router.post("/bulk")
-def create_bulk_responses(
-    payload: BulkSurveyResponseCreate,
-    db: Session = Depends(get_db)
-):
-    responses = [
-        (r.question_id, r.answer)
-        for r in payload.responses
-    ]
-
-    validate_survey_responses(
-        db=db,
-        user_id=payload.user_id,
-        time_answered=payload.time_answered,
-        responses=responses
-    )
-
-    objects = []
-
-    for r in payload.responses:
-        if r.answer=='':
-            continue
-        objects.append(
-            SurveyResponse(
-                    user_id=payload.user_id,
-                    time_answered=payload.time_answered,
-                    question_id=r.question_id,
-                    answer=r.answer
-                )
-        )
-        
-    print(len(objects))
-
-    db.bulk_save_objects(objects)
-    db.commit()
-
-    return {"inserted": len(objects)}
 
 def createPlatformLabel(platform_label: str):
     response = ''
@@ -697,7 +429,10 @@ def createCommentsLabel(commentRes):
             if commentRes[key].lower()=='yes':
                 ys+=1
         ys_per = (ys/tot) * 100
-        response = f'From total comments, {round(ys_per, 2)}% indicate this video might be generated or altered with AI.'
+        if ys>0:
+            response = f'Based on the total comments, {round(ys_per, 2)}% indicate this video might be generated or altered by AI.'
+        else:
+            response = f'Based on the total comments there is no indication that this content might be generated or altered by AI'
         return response
     except:
         return 'Could not analyze comments for AI Generated content indications'
