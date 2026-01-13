@@ -213,6 +213,7 @@ def get_responses_today(mail, worksheet):
     df = pd.DataFrame(records)
 
     if df.empty:
+        print('nothing here')
         return False
 
     # Google Forms timestamp column name
@@ -228,6 +229,7 @@ def get_responses_today(mail, worksheet):
     start_of_today = now.replace(
         hour=0, minute=0, second=0, microsecond=0
     )
+    print(df)
     try:
         filtered_df = df[
             (df[timestamp_col] >= start_of_today) &
@@ -236,6 +238,7 @@ def get_responses_today(mail, worksheet):
         ]
         return len(filtered_df)>0
     except:
+        print('exception')
         return False
 
 
