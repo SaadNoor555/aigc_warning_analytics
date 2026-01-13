@@ -234,13 +234,10 @@ def get_responses_today(mail, worksheet):
     try:
         filtered_df = df[
             (df[timestamp_col] >= start_of_today) &
-            (df[timestamp_col] < start_of_tomorrow) &
             (df['Email'] == mail)
         ]
         print('-----')
         print(df[df[timestamp_col] >= start_of_today])
-        print('-----')
-        print(df[df[timestamp_col] < start_of_tomorrow])
         print('-----')
         print(df[df['Email'] == mail])
         return len(filtered_df)>0
