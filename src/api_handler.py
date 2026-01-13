@@ -204,18 +204,56 @@ async def call_gpts_concurrently(data, base_prompt_cr, base_prompt_cm, base_prom
     return final_json
     # return res_cr, res_cm
 
+import pandas as pd
+from datetime import datetime, timedelta
+
+
+def get_responses_today(mail, worksheet):
+    records = worksheet.get_all_records()
+    df = pd.DataFrame(records)
+
+    if df.empty:
+        return False
+
+    # Google Forms timestamp column name
+    timestamp_col = "Timestamp"
+    # Convert to datetime
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+
+    # Date range
+    now = datetime.now()
+    start_of_tomorrow = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    start_of_today = now.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    try:
+        filtered_df = df[
+            (df[timestamp_col] >= start_of_today) &
+            (df[timestamp_col] < start_of_tomorrow) &
+            (df['Email'] == mail)
+        ]
+        return len(filtered_df)>0
+    except:
+        return False
+
 
 
 
 if __name__=='__main__':
-    with open('data/config.json') as jf:
-        keys = json.load(jf)
+    # with open('data/config.json') as jf:
+    #     keys = json.load(jf)
     
-    yt_key = keys['YT_API_KEY']
-    gpt_key = keys['GPT_API_KEY']
-    video_id = 'SgSnz7kW-Ko'
+    # yt_key = keys['YT_API_KEY']
+    # gpt_key = keys['GPT_API_KEY']
+    # video_id = 'SgSnz7kW-Ko'
 
-    client = AsyncOpenAI(api_key=gpt_key)
-    res = asyncio.run(get_aigc_tag(client, video_id, yt_key))
+    # client = AsyncOpenAI(api_key=gpt_key)
+    # res = asyncio.run(get_aigc_tag(client, video_id, yt_key))
 
-    print(res)
+    # print(res)
+    # responses = get_responses_yesterday_to_today('xyz@xyz.com')
+    # print(f"Responses found: {len(responses)}")
+    # print(responses)
+    print('nothing')

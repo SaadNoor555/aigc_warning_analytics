@@ -8,10 +8,12 @@ from sqlalchemy.sql import func
 from pydantic import BaseModel
 from typing import List
 import json
-from api_handler import call_gpts_concurrently, parse_video_data, src_map
+from api_handler import call_gpts_concurrently, parse_video_data, src_map, get_responses_today
 from openai import AsyncOpenAI
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, time, timedelta
+from google.oauth2.service_account import Credentials
+import gspread
 # FastAPI app instance
 
 # TODO: RESPONSE TYPES AND CODES
@@ -21,6 +23,20 @@ with open('data/config.json') as jf:
 
 yt_key = keys['YT_API_KEY']
 gpt_key = keys['GPT_API_KEY']
+sheet_id = keys['SHEET_ID']
+worksheet = keys['WORKSHEET']
+
+SERVICE_ACCOUNT_FILE = "data/service_account.json"
+
+scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+creds = Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE, scopes=scopes
+)
+print(creds.service_account_email)
+client = gspread.authorize(creds)
+
+sheet = client.open_by_key(sheet_id)
+worksheet = sheet.worksheet(worksheet)
 
 with open('data/base_prompt_creator.txt', 'r', encoding='utf-8') as pf:
     creator_prompt = pf.read()
@@ -124,7 +140,6 @@ def get_db():
 
 
 class AnalyticsUpdate(BaseModel):
-    platform_label  : str | None
     total_time_spent : int | None
     time_spent_platform_label : int | None
     time_spent_creator_label : int | None
@@ -132,7 +147,6 @@ class AnalyticsUpdate(BaseModel):
     time_spent_risk_label : int | None
     time_spent_recommendation : int | None
     audio_warning: bool | None
-    survey: bool | None
 
 
 class AnalyticsResponse(BaseModel):
@@ -201,44 +215,6 @@ class TakenSurvey(BaseModel):
     survey: bool
 
 
-def validate_user_diary_constraints(
-    db: Session,
-    user_id: str,
-    max_entries: int = 10
-):
-    now = datetime.now(timezone.utc)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day = start_of_day + timedelta(days=1)
-
-    # 1️⃣ Same-day check
-    same_day_entry = (
-        db.query(UserDiary)
-        .filter(
-            UserDiary.user_id == user_id,
-            UserDiary.time_written >= start_of_day,
-            UserDiary.time_written < end_of_day
-        )
-        .first()
-    )
-
-    if same_day_entry:
-        print('alrady put a response today')
-        return False
-
-    # 2️⃣ Max entries check
-    total_entries = (
-        db.query(func.count(UserDiary.diary_id))
-        .filter(UserDiary.user_id == user_id)
-        .scalar()
-    )
-
-    if total_entries >= max_entries:
-        print('user already has max number of entires')
-        return False
-    
-    return True
-
-
 
 @diary_router.get(
     "/",
@@ -277,13 +253,6 @@ def create_user_diary(
     diary: UserDiaryCreate,
     db: Session = Depends(get_db)
 ):
-    # ✅ Reusable validation
-    if not validate_user_diary_constraints(db, diary.user_id):
-         raise HTTPException(
-            status_code=400,
-            detail="User has reached the maximum number of diary entries today or for the entirity of the study."
-        )
-
     new_diary = UserDiary(user_id=diary.user_id, text=diary.text)
     db.add(new_diary)
     db.commit()
@@ -324,10 +293,12 @@ def get_unanswered_questions_today(
     user_id: str,
     db: Session = Depends(get_db)
 ):
-    return TakenSurvey(survey=True)
+    res = get_responses_today(user_id, worksheet)
+    print(res)
+    return TakenSurvey(survey=(not res))
 
 
-def create_base_interaction(data: dict, user_id: str, url: str, interaction_id: str, db: Session):
+def create_base_interaction(data: dict, user_id: str, url: str, interaction_id: str, platform_label: str, survey: bool, db: Session):
     db_interaction = Analytics(
         user_id = user_id,
         interaction_id = interaction_id,
@@ -336,6 +307,8 @@ def create_base_interaction(data: dict, user_id: str, url: str, interaction_id: 
         video_description = data['video']['description'],
         video_publisher = data['video']['channelTitle'],
         video_tags = data['video']['tags'],
+        platform_label = platform_label,
+        survey = survey
     )
     db.add(db_interaction)
     db.commit()
@@ -481,9 +454,9 @@ async def get_aigc_tag(
     video_id = extract_youtube_video_id(video_url)
     print(f'user_id: {user_id}\nvideo_id: {video_id}\ninteraction_id: {interaction_id}')
     data = parse_video_data(video_id, yt_key)
-    create_base_interaction(data, user_id, video_url, interaction_id, db)
+    survey = (not get_responses_today(user_id, worksheet))
+    create_base_interaction(data, user_id, video_url, interaction_id, platform_label, survey, db)
     res = await call_gpts_concurrently(data, creator_prompt, comment_prompt, risk_prompt, act_prompt, client)
-    # res['diary'] = validate_user_diary_constraints(db, user_id)
 
     if res['creator_tag'] != 'yes' and len(platform_label)<3:
         return {'payload': {'show': False}}
@@ -495,7 +468,8 @@ async def get_aigc_tag(
         'community_feedback': createCommentsLabel(res['community_tags']),
         'risk_evaluation': createRiskEvalLablel(res['risk_evaluation']),
         'recommendation': createRecommendations(res['sources']),
-        'diary': validate_user_diary_constraints(db, user_id)
+        'diary': True,
+        'survey': survey
     }
     print(payload)
     return {"payload":payload}
