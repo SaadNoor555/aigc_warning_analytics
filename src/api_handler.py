@@ -209,6 +209,7 @@ from datetime import datetime, timedelta
 
 
 def get_responses_today(mail, worksheet):
+    print(mail)
     records = worksheet.get_all_records()
     df = pd.DataFrame(records)
 
@@ -236,6 +237,7 @@ def get_responses_today(mail, worksheet):
             (df[timestamp_col] < start_of_tomorrow) &
             (df['Email'] == mail)
         ]
+        print(filtered_df)
         return len(filtered_df)>0
     except:
         print('exception')
