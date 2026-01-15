@@ -117,6 +117,7 @@ class Analytics(Base):
     time_spent_recommendation = Column(Integer, nullable=True)
     audio_warning             = Column(Boolean, nullable=True)
     survey                    = Column(Boolean, nullable=True)
+    partial                   = Column(Boolean, nullable=True)
 
 
 class UserDiary(Base):
@@ -147,6 +148,7 @@ class AnalyticsUpdate(BaseModel):
     time_spent_risk_label : int | None
     time_spent_recommendation : int | None
     audio_warning: bool | None
+    partial: bool | None
 
 
 class AnalyticsResponse(BaseModel):
@@ -167,36 +169,11 @@ class AnalyticsResponse(BaseModel):
     time_spent_recommendation : int | None
     audio_warning: bool | None
     survey: bool | None
+    partial: bool | None
 
     class Config:
         from_attributes = True  # required for SQLAlchemy → Pydantic
 
-class SurveyResponseCreate(BaseModel):
-    user_id: str
-    question_id: int
-    answer: str
-
-class SurveyResponseUpdate(BaseModel):
-    answer: str
-
-class SurveyResponseOut(BaseModel):
-    response_id: int
-    user_id: str
-    time_answered: datetime
-    question_id: int
-    answer: str
-
-    class Config:
-        from_attributes = True
-
-class BulkSurveyAnswer(BaseModel):
-    question_id: int
-    answer: str
-
-class BulkSurveyResponseCreate(BaseModel):
-    user_id: str
-    time_answered: datetime
-    responses: List[BulkSurveyAnswer]
 
 class UserDiaryCreate(BaseModel):
     user_id: str
