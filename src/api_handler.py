@@ -61,11 +61,17 @@ def parse_video_data(video_id: str, yt_key: str) -> dict:
         'tags': snippet['tags'] if 'tags' in snippet.keys() else []
     }
 
-    commentData = fetch_video_comments(video_id, yt_key, 2)
+    commentData = fetch_video_comments(video_id, yt_key, 10)
+    total_len = 0
+    comments_num = 0
     comments = []
     # print(commentData['items'])
     for item in commentData['items']:
+        comments_num += 1
+        if comments_num>5 and total_len>2000:
+            continue
         tmp = item['snippet']['topLevelComment']['snippet']
+        total_len += len(tmp['textOriginal'])
         comments.append(
             {
                 'author': tmp['authorDisplayName'],
