@@ -32,7 +32,7 @@ scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 creds = Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=scopes
 )
-print(creds.service_account_email)
+# print(creds.service_account_email)
 client = gspread.authorize(creds)
 
 sheet = client.open_by_key(sheet_id)
@@ -108,6 +108,7 @@ class Analytics(Base):
     video_tags          = Column(JSON, nullable=False)
     video_publisher     = Column(String, nullable=False)
     time_requested      = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable= False)
+    popup               = Column(Boolean, nullable=False)
     platform_label            = Column(String, nullable = True)
     total_time_spent          = Column(Integer, nullable=True)
     time_spent_platform_label = Column(Integer, nullable=True)
@@ -118,6 +119,14 @@ class Analytics(Base):
     audio_warning             = Column(Boolean, nullable=True)
     survey                    = Column(Boolean, nullable=True)
     partial                   = Column(Boolean, nullable=True)
+    platform_indication       = Column(String, nullable=True)
+    creator_indication        = Column(String, nullable=True)
+    comment_indication        = Column(String, nullable=True)
+    risk_level                = Column(String, nullable=True)
+    content_category          = Column(String, nullable=True)
+    ai_tactic                 = Column(String, nullable=True)
+    action_before_share       = Column(String, nullable=True)
+    action_trusted_sources    = Column(String, nullable=True)
 
 
 class UserDiary(Base):
@@ -140,6 +149,18 @@ def get_db():
         db.close()
 
 
+class ResponseSave(BaseModel):
+    popup : bool
+    platform_indication : str | None = None
+    creator_indication : str | None = None
+    comment_indication : str | None = None
+    risk_level : str | None = None
+    content_category: str | None = None
+    ai_tactic : str | None = None
+    action_before_share : str | None = None
+    action_trusted_sources : str | None = None
+    
+
 class AnalyticsUpdate(BaseModel):
     total_time_spent : int | None
     time_spent_platform_label : int | None
@@ -161,6 +182,7 @@ class AnalyticsResponse(BaseModel):
     video_publisher : str
     time_requested  : datetime
     platform_label  : str | None
+    popup           : bool
     total_time_spent : int | None
     time_spent_platform_label : int | None
     time_spent_creator_label : int | None
@@ -170,6 +192,14 @@ class AnalyticsResponse(BaseModel):
     audio_warning: bool | None
     survey: bool | None
     partial: bool | None
+    platform_indication : str | None = None
+    creator_indication : str | None = None
+    comment_indication : str | None = None
+    risk_level : str | None = None
+    content_category: str | None = None
+    ai_tactic : str | None = None
+    action_before_share : str | None = None
+    action_trusted_sources : str | None = None
 
     class Config:
         from_attributes = True  # required for SQLAlchemy → Pydantic
@@ -271,7 +301,7 @@ def get_unanswered_questions_today(
     db: Session = Depends(get_db)
 ):
     res = get_responses_today(user_id, worksheet)
-    print(res)
+    # print(res)
     return TakenSurvey(survey=(not res))
 
 
@@ -285,7 +315,8 @@ def create_base_interaction(data: dict, user_id: str, url: str, interaction_id: 
         video_publisher = data['video']['channelTitle'],
         video_tags = data['video']['tags'],
         platform_label = platform_label,
-        survey = survey
+        survey = survey,
+        popup = False
     )
     db.add(db_interaction)
     db.commit()
@@ -308,7 +339,7 @@ def save_full_analytics(
 ):
     db_analytic = db.query(Analytics).filter(Analytics.interaction_id == interaction_id).first()
     if not db_analytic:
-        raise HTTPException(status_code=404, detail="Question not found")
+        raise HTTPException(status_code=404, detail="analytics not found")
 
     for key, value in updated.model_dump().items():
         setattr(db_analytic, key, value)
@@ -316,6 +347,17 @@ def save_full_analytics(
     db.commit()
     db.refresh(db_analytic)
     print('interaction updated successfully')
+
+def save_gpt_responses(interaction_id: str, respone: ResponseSave, db: Session):
+    db_analytic = db.query(Analytics).filter(Analytics.interaction_id == interaction_id).first()
+    if not db_analytic:
+        print(f'analytic {interaction_id} not found')
+    for key, value in respone.model_dump().items():
+        setattr(db_analytic, key, value)
+    
+    db.commit()
+    db.refresh(db_analytic)
+    print('interaction updated with responses successfully')
 
 
 def extract_youtube_video_id(url: str) -> str | None:
@@ -396,7 +438,7 @@ def createCreatorLabel(creator):
     return response
 
 def createRiskEvalLablel(risk_eval):
-    print(risk_eval)
+    # print(risk_eval)
     risk_tactic = risk_eval['tactic'] if 'tactic' in risk_eval else 'unknown'
     return {
         "level": risk_eval['risk'] if 'risk' in risk_eval else 'unknown',
@@ -413,7 +455,7 @@ def createRecommendations(sources_obj):
         pass
     sources_tag = ' :'
     for src in sources:
-        sources_tag += f'<a href={src_map[src.lower()]}>{src}</a>, '
+        sources_tag += f'<a style="color:#887aad" href={src_map[src.lower()]}>{src}</a>, '
     sources_tag = sources_tag[:-2]
     return {
         "before_share": "Sharing AI-generated content without disclosure can cause others to misinterpret it as authentic and spread it further. It may lead to scams in the worst cases, as misleading medical content can be used to trick viewers into false beliefs or fraudulent medical purchases. Please indicate in your post or text that the content is AI-generated.",
@@ -429,15 +471,22 @@ async def get_aigc_tag(
     db: Session = Depends(get_db)
 ):
     video_id = extract_youtube_video_id(video_url)
-    print(f'user_id: {user_id}\nvideo_id: {video_id}\ninteraction_id: {interaction_id}')
+    if video_id==None:
+        print(f'not youtube video: {video_url}')
+        return {'payload': {'show': False}}
+    # print(f'user_id: {user_id}\nvideo_id: {video_id}\ninteraction_id: {interaction_id}')
     data = parse_video_data(video_id, yt_key)
     survey = (not get_responses_today(user_id, worksheet))
     create_base_interaction(data, user_id, video_url, interaction_id, platform_label, survey, db)
     res = await call_gpts_concurrently(data, creator_prompt, comment_prompt, risk_prompt, act_prompt, client)
 
+    response = ResponseSave(popup=False)
+
     if res['creator_tag'] != 'yes' and len(platform_label)<3:
+        save_gpt_responses(interaction_id, response, db)
         return {'payload': {'show': False}}
-    print(res)
+    # print(res)
+    response.popup = True
     payload = {
         'show': True,
         'platform_indication': createPlatformLabel(platform_label),
@@ -448,7 +497,18 @@ async def get_aigc_tag(
         'diary': True,
         'survey': survey
     }
-    print(payload)
+
+    response.platform_indication = payload['platform_indication']
+    response.creator_indication = payload['creator_metadata']
+    response.comment_indication = payload['community_feedback']
+    response.risk_level = payload['risk_evaluation']['level']
+    response.content_category = payload['risk_evaluation']['category']
+    response.ai_tactic = payload['risk_evaluation']['tactics_name']
+    response.action_before_share = payload['recommendation']['before_share']
+    response.action_trusted_sources = payload['recommendation']['check_sources']
+    save_gpt_responses(interaction_id, response, db)
+
+    # print(response)
     return {"payload":payload}
 
 app.include_router(response_router)
