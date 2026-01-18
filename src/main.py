@@ -310,7 +310,10 @@ def download_user_diary_csv(
     user_id: str | None = Query(None, description="Filter by user_id"),
 ):
     if password != server_pass:
-        raise HTTPException("Incorrect Password")
+        raise HTTPException(
+            status_code=404,
+            detail="Incorrect password."
+            )
 
     query = db.query(UserDiary)
 
@@ -541,7 +544,10 @@ def download_analytics_csv(
     popup: bool | None = Query(None, description="Filter by popup true/false"),
 ):
     if password != server_pass:
-        raise HTTPException("Incorrect Password")
+        raise HTTPException(
+            status_code=404,
+            detail="Incorrect password."
+            )
 
     query = db.query(Analytics)
 
