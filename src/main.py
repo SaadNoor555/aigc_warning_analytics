@@ -14,6 +14,9 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, time, timedelta
 from google.oauth2.service_account import Credentials
 import gspread
+import csv
+import io
+from fastapi.responses import StreamingResponse
 # FastAPI app instance
 
 # TODO: RESPONSE TYPES AND CODES
@@ -25,6 +28,8 @@ yt_key = keys['YT_API_KEY']
 gpt_key = keys['GPT_API_KEY']
 sheet_id = keys['SHEET_ID']
 worksheet = keys['WORKSHEET']
+server_pass = keys['SERVER_PASS']
+
 
 SERVICE_ACCOUNT_FILE = "data/service_account.json"
 
@@ -292,6 +297,68 @@ def delete_user_diary(
     db.delete(diary)
     db.commit()
 
+
+@diary_router.get(
+    "/download/csv"
+)
+def download_user_diary_csv(
+    db: Session = Depends(get_db),
+    password: str = Query(description="Enter server password"),
+    # Optional filters
+    start_time: datetime | None = Query(None, description="Filter: time_written >= start_time (UTC)"),
+    end_time: datetime | None = Query(None, description="Filter: time_written <= end_time (UTC)"),
+    user_id: str | None = Query(None, description="Filter by user_id"),
+):
+    if password != server_pass:
+        raise HTTPException("Incorrect Password")
+
+    query = db.query(UserDiary)
+
+    # Apply filters
+    if start_time:
+        query = query.filter(UserDiary.time_written >= start_time)
+
+    if end_time:
+        query = query.filter(UserDiary.time_written <= end_time)
+
+    if user_id:
+        query = query.filter(UserDiary.user_id == user_id)
+
+    results = query.order_by(UserDiary.time_written.asc()).all()
+
+    # CSV buffer
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header row
+    writer.writerow([
+        "diary_id",
+        "time_written",
+        "user_id",
+        "text",
+    ])
+
+    # Data rows
+    for row in results:
+        writer.writerow([
+            row.diary_id,
+            row.time_written.isoformat() if row.time_written else None,
+            row.user_id,
+            row.text,
+        ])
+
+    output.seek(0)
+
+    filename = f"user_diary_export_{datetime.utcnow().isoformat()}.csv"
+
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
+
 @questions_router.get(
     "/unanswered/{user_id}",
     response_model=TakenSurvey
@@ -461,6 +528,123 @@ def createRecommendations(sources_obj):
         "before_share": "Sharing AI-generated content without disclosure can cause others to misinterpret it as authentic and spread it further. It may lead to scams in the worst cases, as misleading medical content can be used to trick viewers into false beliefs or fraudulent medical purchases. Please indicate in your post or text that the content is AI-generated.",
         "check_sources": f"Do not take the content at face value. Search for corroboration in trusted sources: {sources_tag if len(sources_tag)>2 else "<a href=google.com>Google</a>"}."
     }
+
+
+@analytics_router.get("/download/csv")
+def download_analytics_csv(
+    db: Session = Depends(get_db),
+    password: str = Query(description="Enter server password"),
+    # Optional filters
+    start_time: datetime | None = Query(None, description="Filter: time_requested >= start_time (UTC)"),
+    end_time: datetime | None = Query(None, description="Filter: time_requested <= end_time (UTC)"),
+    user_id: str | None = Query(None, description="Filter by user_id"),
+    popup: bool | None = Query(None, description="Filter by popup true/false"),
+):
+    if password != server_pass:
+        raise HTTPException("Incorrect Password")
+
+    query = db.query(Analytics)
+
+    # Apply filters
+    if start_time:
+        query = query.filter(Analytics.time_requested >= start_time)
+
+    if end_time:
+        query = query.filter(Analytics.time_requested <= end_time)
+
+    if user_id:
+        query = query.filter(Analytics.user_id == user_id)
+
+    if popup is not None:
+        query = query.filter(Analytics.popup == popup)
+
+    results = query.all()
+
+    # CSV buffer
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header row
+    writer.writerow([
+        "interaction_id",
+        "user_id",
+        "video_url",
+        "video_title",
+        "video_description",
+        "video_tags",
+        "video_publisher",
+        "time_requested",
+        "popup",
+        "platform_label",
+        "total_time_spent",
+        "time_spent_platform_label",
+        "time_spent_creator_label",
+        "time_spent_comment_label",
+        "time_spent_risk_label",
+        "time_spent_recommendation",
+        "audio_warning",
+        "survey",
+        "partial",
+        "platform_indication",
+        "creator_indication",
+        "comment_indication",
+        "risk_level",
+        "content_category",
+        "ai_tactic",
+        "action_before_share",
+        "action_trusted_sources",
+    ])
+
+    # Data rows
+    for row in results:
+        total_time = row.total_time_spent if (row.total_time_spent and row.total_time_spent<3600*2*1000) else 0
+        platform_time = row.time_spent_platform_label if (row.time_spent_platform_label and row.time_spent_platform_label<total_time) else 0
+        creator_time = row.time_spent_creator_label if (row.time_spent_creator_label and row.time_spent_creator_label<total_time) else 0
+        comments_time = row.time_spent_comment_label if (row.time_spent_comment_label and row.time_spent_comment_label<total_time) else 0
+        risk_time = row.time_spent_risk_label if (row.time_spent_risk_label and row.time_spent_risk_label<total_time) else 0
+        rec_time = row.time_spent_recommendation if (row.time_spent_recommendation and row.time_spent_recommendation<total_time) else 0
+
+        writer.writerow([
+            row.interaction_id,
+            row.user_id,
+            row.video_url,
+            row.video_title,
+            row.video_description,
+            ",".join(row.video_tags) if row.video_tags else None,
+            row.video_publisher,
+            row.time_requested.isoformat() if row.time_requested else None,
+            row.popup,
+            row.platform_label,
+            total_time,
+            platform_time,
+            creator_time,
+            comments_time,
+            risk_time,
+            rec_time,
+            row.audio_warning,
+            row.survey,
+            row.partial,
+            row.platform_indication,
+            row.creator_indication,
+            row.comment_indication,
+            row.risk_level,
+            row.content_category,
+            row.ai_tactic,
+            row.action_before_share,
+            row.action_trusted_sources,
+        ])
+
+    output.seek(0)
+
+    filename = f"analytics_export_{datetime.utcnow().isoformat()}.csv"
+
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
 
 @app.get("/aig_tags")
 async def get_aigc_tag(
