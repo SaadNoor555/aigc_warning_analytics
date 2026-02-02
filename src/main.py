@@ -17,6 +17,12 @@ import gspread
 import csv
 import io
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse
+import secrets
+
 # FastAPI app instance
 
 # TODO: RESPONSE TYPES AND CODES
@@ -29,6 +35,7 @@ gpt_key = keys['GPT_API_KEY']
 sheet_id = keys['SHEET_ID']
 worksheet = keys['WORKSHEET']
 server_pass = keys['SERVER_PASS']
+server_admin = keys['SERVER_ADMIN']
 
 
 SERVICE_ACCOUNT_FILE = "data/service_account.json"
@@ -68,12 +75,28 @@ tactic_map = {
 }
 
 
+security = HTTPBasic()
 
+def swagger_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, server_admin)
+    correct_password = secrets.compare_digest(credentials.password, server_pass)
+
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Basic"},
+        )
 
 
 client = AsyncOpenAI(api_key=gpt_key)
 
-app = FastAPI()
+app = FastAPI(
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None
+)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,6 +107,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def openapi_json(_: HTTPBasicCredentials = Depends(swagger_auth)):
+    return JSONResponse(
+        get_openapi(
+            title="AIGC Detection API",
+            version="1.0.0",
+            routes=app.routes,
+        )
+    )
+
+@app.get("/docs", include_in_schema=False)
+def swagger_ui(_: HTTPBasicCredentials = Depends(swagger_auth)):
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="AIGC Detection API Docs"
+    )
 
 
 
@@ -536,19 +577,12 @@ def createRecommendations(sources_obj):
 @analytics_router.get("/download/csv")
 def download_analytics_csv(
     db: Session = Depends(get_db),
-    password: str = Query(description="Enter server password"),
     # Optional filters
     start_time: datetime | None = Query(None, description="Filter: time_requested >= start_time (UTC)"),
     end_time: datetime | None = Query(None, description="Filter: time_requested <= end_time (UTC)"),
     user_id: str | None = Query(None, description="Filter by user_id"),
     popup: bool | None = Query(None, description="Filter by popup true/false"),
 ):
-    if password != server_pass:
-        raise HTTPException(
-            status_code=404,
-            detail="Incorrect password."
-            )
-
     query = db.query(Analytics)
 
     # Apply filters
