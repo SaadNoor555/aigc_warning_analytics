@@ -344,18 +344,11 @@ def delete_user_diary(
 )
 def download_user_diary_csv(
     db: Session = Depends(get_db),
-    password: str = Query(description="Enter server password"),
     # Optional filters
     start_time: datetime | None = Query(None, description="Filter: time_written >= start_time (UTC)"),
     end_time: datetime | None = Query(None, description="Filter: time_written <= end_time (UTC)"),
     user_id: str | None = Query(None, description="Filter by user_id"),
 ):
-    if password != server_pass:
-        raise HTTPException(
-            status_code=404,
-            detail="Incorrect password."
-            )
-
     query = db.query(UserDiary)
 
     # Apply filters
