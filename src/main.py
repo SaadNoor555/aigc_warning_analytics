@@ -660,6 +660,7 @@ async def get_aigc_tag(
     platform_label: str = Query(..., description="Platform label provided"),
     db: Session = Depends(get_db)
 ):
+    return {'payload': {'show': False}}
     video_id = extract_youtube_video_id(video_url)
     if video_id==None:
         print(f'not youtube video: {video_url}')
